@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -21,20 +23,13 @@ from src.core.database import Base, engine
 
 app = FastAPI()
 
-# Debugging middleware to track requests
-@app.middleware("http")
-async def debug_requests(request, call_next):
-    print(f"🔍 Incoming request: {request.method} {request.url}")
-    print(f"🔍 Origin: {request.headers.get('origin')}")
-    print(f"🔍 Headers: {dict(request.headers)}")
-    response = await call_next(request)
-    print(f"🔍 Response status: {response.status_code}")
-    return response
+# CORS — use ALLOWED_ORIGINS env var (comma-separated) or fallback to all
+_allowed = os.getenv("ALLOWED_ORIGINS", "*")
+_origins = [o.strip() for o in _allowed.split(",") if o.strip()]
 
-# More permissive CORS for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
