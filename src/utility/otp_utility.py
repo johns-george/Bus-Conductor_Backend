@@ -51,9 +51,12 @@ def send_otp_sms(phone: str, otp: str) -> dict:
         return {"success": True, "message": "OTP sent (dev mode — see server logs)"}
 
     # Production — send via msg91
+    # Strip '+' prefix — msg91 expects raw digits with country code
+    mobile = phone.lstrip("+")
+
     url = "https://api.msg91.com/api/v5/otp"
     payload = {
-        "mobile": phone,
+        "mobile": mobile,
         "otp": otp,
         "template_id": template_id,
         "sender": sender_id,
@@ -66,9 +69,10 @@ def send_otp_sms(phone: str, otp: str) -> dict:
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         data = resp.json()
+        logger.info(f"msg91 response: {data}")
 
         if resp.status_code == 200 and data.get("type") == "success":
-            logger.info(f"✅ OTP sent to {phone}")
+            logger.info(f"✅ OTP sent to {mobile}")
             return {"success": True, "message": "OTP sent successfully"}
         else:
             logger.error(f"❌ msg91 error: {data}")
@@ -77,7 +81,7 @@ def send_otp_sms(phone: str, otp: str) -> dict:
     except Exception as e:
         logger.error(f"❌ OTP send failed: {e}")
         # Fall back to console
-        print(f"\n📱 OTP (fallback — SMS failed): {otp} to {phone}", flush=True)
+        print(f"\n📱 OTP (fallback — SMS failed): {otp} to {mobile}", flush=True)
         return {"success": True, "message": "OTP sent (see server logs)"}
 
 
