@@ -1,14 +1,40 @@
+import logging
+import time
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from src.models.user import User
 from src.schemas.signup import SignUpRequest
 from src.utility.hash_utility import hash_password, verify_password
 from src.utility.auth_utility import create_tokens
 from src.utility.google_auth import verify_google_token
+from src.utility.otp_utility import generate_otp, send_otp_sms, send_otp_email
 from fastapi import HTTPException, Response
 from uuid import uuid4
 
-_pending_otps: dict[str, dict[str, str]] = {}
-_password_reset_tokens: dict[str, str] = {}
+logger = logging.getLogger("busconductor.auth")
+
+# OTP storage with timestamps for expiration
+_pending_otps: dict[str, dict] = {}  # request_id -> {phone, code, expires_at, channel}
+_password_reset_tokens: dict[str, dict] = {}  # token -> {username, expires_at}
+
+OTP_EXPIRY_SECONDS = 300  # 5 minutes
+PASSWORD_RESET_EXPIRY_SECONDS = 3600  # 1 hour
+
+
+def _cleanup_expired_otps():
+    """Remove expired OTPs from memory."""
+    now = time.time()
+    expired = [k for k, v in _pending_otps.items() if v.get("expires_at", 0) < now]
+    for k in expired:
+        _pending_otps.pop(k, None)
+
+
+def _cleanup_expired_reset_tokens():
+    """Remove expired password reset tokens from memory."""
+    now = time.time()
+    expired = [k for k, v in _password_reset_tokens.items() if v.get("expires_at", 0) < now]
+    for k in expired:
+        _password_reset_tokens.pop(k, None)
 
 
 def _user_payload(user: User):
@@ -114,20 +140,15 @@ def signin(username: str, password: str, db: Session, response: Response):
         user = db.query(User).filter(User.email == username).first()
     
     if not user:
-        print(f"🔍 DEBUG: User not found for username: {username}")
+        logger.debug("User not found: %s", username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    
+
     if not user.password_hash:
-        print(f"🔍 DEBUG: User found but password_hash is None for user: {username}")
+        logger.debug("User has no password: %s", username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    
-    password_valid = verify_password(password, user.password_hash)
-    print(f"🔍 DEBUG: Password verification result: {password_valid}")
-    print(f"🔍 DEBUG: Input password: '{password}'")
-    print(f"🔍 DEBUG: Stored hash: '{user.password_hash}'")
-    
-    if not password_valid:
-        print(f"🔍 DEBUG: Password verification failed for user: {username}")
+
+    if not verify_password(password, user.password_hash):
+        logger.debug("Password mismatch: %s", username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     access_token, refresh_token = create_tokens(user.username)
@@ -140,35 +161,115 @@ def signin(username: str, password: str, db: Session, response: Response):
     }
 
 
-def request_otp(phone: str, country: str):
+def request_otp(phone: str, country: str, channel: str = "sms"):
+    """Request OTP via SMS or email.
+    
+    Args:
+        phone: Phone number or email address
+        country: Country code (for phone) or 'email'
+        channel: 'sms' or 'email'
+    """
+    _cleanup_expired_otps()
+    
+    # Check rate limiting — max 3 OTPs per phone/email in 10 minutes
+    recent_otps = [
+        v for v in _pending_otps.values()
+        if v.get("phone") == phone and v.get("expires_at", 0) > time.time() - 600
+    ]
+    if len(recent_otps) >= 3:
+        raise HTTPException(status_code=429, detail="Too many OTP requests. Please wait 10 minutes.")
+    
     request_id = f"otp_{uuid4().hex[:12]}"
+    otp_code = generate_otp()
+    
     _pending_otps[request_id] = {
         "phone": phone,
         "country": country,
-        "code": "123456",
+        "code": otp_code,
+        "channel": channel,
+        "expires_at": time.time() + OTP_EXPIRY_SECONDS,
+        "attempts": 0,
     }
-    return {"message": "OTP sent", "request_id": request_id}
+    
+    # Send OTP via selected channel
+    if channel == "email":
+        result = send_otp_email(to_email=phone, otp=otp_code)
+    else:
+        # Format phone with country code for SMS
+        formatted_phone = f"{country}{phone}" if country and not phone.startswith(country) else phone
+        result = send_otp_sms(phone=formatted_phone, otp=otp_code)
+    
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail="Failed to send OTP")
+    
+    return {
+        "message": f"OTP sent to {phone}",
+        "request_id": request_id,
+        "channel": channel,
+    }
 
 
 def verify_otp(request_id: str, code: str, db: Session, response: Response):
+    """Verify OTP and authenticate user."""
+    _cleanup_expired_otps()
+    
     payload = _pending_otps.get(request_id)
-    if payload is None or payload["code"] != code:
+    if payload is None:
+        raise HTTPException(status_code=400, detail="OTP expired or invalid request")
+    
+    # Check expiration
+    if time.time() > payload.get("expires_at", 0):
+        _pending_otps.pop(request_id, None)
+        raise HTTPException(status_code=400, detail="OTP expired. Please request a new one.")
+    
+    # Check attempts (max 5)
+    if payload.get("attempts", 0) >= 5:
+        _pending_otps.pop(request_id, None)
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Please request a new OTP.")
+    
+    payload["attempts"] = payload.get("attempts", 0) + 1
+    
+    # Verify code
+    if payload["code"] != code:
         raise HTTPException(status_code=400, detail="Invalid OTP")
-
-    username = f"{payload['country']}{payload['phone']}"
-    existing = db.query(User).filter(User.username == username).first()
-    if existing is None:
-        existing = User(
-            username=username,
-            email=f"{payload['phone']}@phone.local",
-            mobile_number=username,
-            full_name="Phone User",
-            password_hash=None,
-        )
-        db.add(existing)
-        db.commit()
-        db.refresh(existing)
-
+    
+    # OTP verified — find or create user
+    phone = payload["phone"]
+    country = payload.get("country", "")
+    
+    if payload.get("channel") == "email":
+        # Email-based login
+        existing = db.query(User).filter(User.email == phone).first()
+        if existing is None:
+            username = phone.split("@")[0]
+            # Ensure unique username
+            if db.query(User).filter(User.username == username).first():
+                username = f"{username}_{uuid4().hex[:6]}"
+            existing = User(
+                username=username,
+                email=phone,
+                password_hash=None,
+                full_name="Email User",
+            )
+            db.add(existing)
+            db.commit()
+            db.refresh(existing)
+    else:
+        # Phone-based login
+        username = f"{country}{phone}" if country and not phone.startswith(country) else phone
+        existing = db.query(User).filter(User.username == username).first()
+        if existing is None:
+            existing = User(
+                username=username,
+                email=f"{phone}@phone.local",
+                mobile_number=username,
+                full_name="Phone User",
+                password_hash=None,
+            )
+            db.add(existing)
+            db.commit()
+            db.refresh(existing)
+    
     _pending_otps.pop(request_id, None)
     access_token, refresh_token = create_tokens(existing.username)
     _set_auth_cookies(response, access_token, refresh_token)
@@ -196,7 +297,7 @@ def firebase_phone_login(id_token: str, db: Session, response: Response):
             audience=project_id if project_id else None,
         )
     except Exception as e:
-        print(f"❌ Firebase token verification failed: {e}", flush=True)
+        logger.error("Firebase token verification failed: %s", e)
         raise HTTPException(status_code=401, detail=f"Invalid Firebase token: {e}")
 
     phone = claims.get("phone_number", "")
@@ -251,15 +352,16 @@ def request_password_reset(email: str, db: Session):
     # Always return the same message to prevent email enumeration
     if user is None:
         return {"message": "If the email exists, reset instructions are sent"}
+    
+    _cleanup_expired_reset_tokens()
+    
     token = f"rst_{uuid4().hex}"
-    _password_reset_tokens[token] = user.username
+    _password_reset_tokens[token] = {
+        "username": user.username,
+        "expires_at": time.time() + PASSWORD_RESET_EXPIRY_SECONDS,
+    }
 
-    # Print token to console for development
-    print(f"\n{'='*60}", flush=True)
-    print(f"🔐 PASSWORD RESET TOKEN", flush=True)
-    print(f"Email: {email}", flush=True)
-    print(f"Token: {token}", flush=True)
-    print(f"{'='*60}\n", flush=True)
+    logger.info("Password reset requested for %s", email)
 
     # Send the reset email
     from src.utility.email_utility import send_password_reset_email
@@ -267,7 +369,6 @@ def request_password_reset(email: str, db: Session):
 
     return {
         "message": "If the email exists, reset instructions are sent",
-        "reset_token": token,
     }
 
 def google_oauth_login(id_token: str, db: Session):
@@ -340,13 +441,23 @@ def google_oauth_login(id_token: str, db: Session):
     }
 
 def confirm_password_reset(token: str, password: str, db: Session):
-    username = _password_reset_tokens.get(token)
-    if username is None:
-        raise HTTPException(status_code=400, detail="Invalid reset token")
+    _cleanup_expired_reset_tokens()
+    
+    token_data = _password_reset_tokens.get(token)
+    if token_data is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    
+    # Check expiration
+    if time.time() > token_data.get("expires_at", 0):
+        _password_reset_tokens.pop(token, None)
+        raise HTTPException(status_code=400, detail="Reset token expired. Please request a new one.")
+    
+    username = token_data["username"]
     user = db.query(User).filter(User.username == username).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     user.password_hash = hash_password(password)
     db.commit()
     _password_reset_tokens.pop(token, None)
+    logger.info("Password reset completed for %s", username)
     return {"message": "Password reset successful"}

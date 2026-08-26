@@ -1,43 +1,33 @@
 """Email utility for sending password reset and notification emails.
 
-Uses Python's built-in smtplib. Configure SMTP settings via environment variables:
-  SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
+Uses Resend API (simple, 3K free emails/month).
+Configure via environment variables:
+  RESEND_API_KEY, SMTP_FROM
 
-If SMTP is not configured, falls back to printing the email to the console
-(useful for local development).
+If Resend is not configured, falls back to SMTP (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS).
+If neither is configured, prints to console (dev mode).
+
+To get a free Resend account:
+  1. Go to https://resend.com
+  2. Sign up with GitHub
+  3. Get API key from API Keys page
+  4. Add RESEND_API_KEY to Render env vars
 """
 
 import os
-import sys
 import smtplib
 import logging
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 logger = logging.getLogger(__name__)
 
 
-def _smtp_config() -> dict | None:
-    host = os.getenv("SMTP_HOST")
-    port = os.getenv("SMTP_PORT")
-    user = os.getenv("SMTP_USER")
-    password = os.getenv("SMTP_PASS")
-    if not host or not port:
-        return None
-    return {
-        "host": host,
-        "port": int(port),
-        "user": user or "",
-        "password": password or "",
-        "from_email": os.getenv("SMTP_FROM", user or f"noreply@busconductor.com"),
-    }
-
-
 def send_password_reset_email(to_email: str, reset_token: str, reset_url: str = "") -> bool:
     """Send a password reset email with the token.
-
+    
     Returns True if sent successfully, False otherwise.
-    If SMTP is not configured, prints to console and returns True (dev mode).
     """
     subject = "Bus Conductor — Reset Your Password"
     body = f"""Hello,
@@ -76,43 +66,70 @@ If you didn't request this, please ignore this email.
 </body>
 </html>"""
 
-    config = _smtp_config()
+    # Try Resend API first
+    api_key = os.getenv("RESEND_API_KEY", "")
+    from_email = os.getenv("SMTP_FROM", "Bus Conductor <onboarding@resend.dev>")
 
-    if config is None:
-        # Dev mode — print to console
-        logger.warning("⚠️  SMTP not configured. Printing reset email to console.")
-        print(f"\n{'='*60}", flush=True)
-        print(f"📧 PASSWORD RESET EMAIL", flush=True)
-        print(f"To: {to_email}", flush=True)
-        print(f"Subject: {subject}", flush=True)
-        print(f"{'='*60}", flush=True)
-        print(body, flush=True)
-        print(f"{'='*60}\n", flush=True)
-        return True
+    if api_key:
+        try:
+            resp = requests.post(
+                "https://api.resend.com/emails",
+                json={
+                    "from": from_email,
+                    "to": [to_email],
+                    "subject": subject,
+                    "html": html_body,
+                },
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            if resp.status_code == 200 and data.get("id"):
+                logger.info(f"✅ Password reset email sent to {to_email} via Resend")
+                return True
+            else:
+                logger.warning(f"⚠️  Resend failed: {data}, falling back to SMTP")
+        except Exception as e:
+            logger.warning(f"⚠️  Resend error: {e}, falling back to SMTP")
 
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = config["from_email"]
-        msg["To"] = to_email
+    # Fallback to SMTP
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = os.getenv("SMTP_PORT")
+    if smtp_host and smtp_port:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = from_email
+            msg["To"] = to_email
+            msg.attach(MIMEText(body, "plain"))
+            msg.attach(MIMEText(html_body, "html"))
 
-        msg.attach(MIMEText(body, "plain"))
-        msg.attach(MIMEText(html_body, "html"))
-
-        with smtplib.SMTP(config["host"], config["port"]) as server:
-            server.ehlo()
-            if config["port"] == 587:
-                server.starttls()
+            with smtplib.SMTP(smtp_host, int(smtp_port)) as server:
                 server.ehlo()
-            if config["user"] and config["password"]:
-                server.login(config["user"], config["password"])
-            server.sendmail(config["from_email"], to_email, msg.as_string())
+                if int(smtp_port) == 587:
+                    server.starttls()
+                    server.ehlo()
+                smtp_user = os.getenv("SMTP_USER", "")
+                smtp_pass = os.getenv("SMTP_PASS", "")
+                if smtp_user and smtp_pass:
+                    server.login(smtp_user, smtp_pass)
+                server.sendmail(from_email, to_email, msg.as_string())
 
-        logger.info(f"✅ Password reset email sent to {to_email}")
-        return True
+            logger.info(f"✅ Password reset email sent to {to_email} via SMTP")
+            return True
+        except Exception as e:
+            logger.error(f"❌ SMTP send failed: {e}")
 
-    except Exception as e:
-        logger.error(f"❌ Failed to send email to {to_email}: {e}")
-        print(f"\n📧 EMAIL FAILED — Printing to console instead:")
-        print(body)
-        return False
+    # Dev mode — print to console
+    logger.warning("⚠️  No email service configured. Printing to console.")
+    print(f"\n{'='*60}", flush=True)
+    print(f"📧 PASSWORD RESET EMAIL", flush=True)
+    print(f"To: {to_email}", flush=True)
+    print(f"Subject: {subject}", flush=True)
+    print(f"{'='*60}", flush=True)
+    print(body, flush=True)
+    print(f"{'='*60}\n", flush=True)
+    return True

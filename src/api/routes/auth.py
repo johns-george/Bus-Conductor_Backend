@@ -17,7 +17,8 @@ class FirebaseTokenRequest(BaseModel):
 
 class OtpRequest(BaseModel):
     phone: str
-    country: str
+    country: str = ""
+    channel: str = "sms"  # 'sms' or 'email'
 
 
 class OtpVerifyRequest(BaseModel):
@@ -110,7 +111,7 @@ def logout(response: Response):
 
 @router.post("/request-otp")
 def request_otp(payload: OtpRequest):
-    return auth_service.request_otp(payload.phone, payload.country)
+    return auth_service.request_otp(payload.phone, payload.country, payload.channel)
 
 
 @router.post("/verify-otp")

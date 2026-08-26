@@ -1,3 +1,4 @@
+import logging
 import time
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,6 +7,8 @@ from src.core.database import get_db
 from src.services.ticket_service import create_ticket
 from src.dao.wallet_dao import get_or_create_wallet, debit as wallet_debit
 from src.dao.transaction_dao import create_transaction
+
+logger = logging.getLogger("busconductor.payments")
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -29,12 +32,10 @@ class ProcessPaymentRequest(BaseModel):
 
 @router.post("/process")
 def process_payment(payload: ProcessPaymentRequest, db: Session = Depends(get_db)):
-    print(f"💳 Processing payment: {payload.method_type} - ${payload.amount}")
+    logger.info("Processing payment: %s ₹%.2f", payload.method_type, payload.amount)
 
-    # Simulate payment processing delay
-    time.sleep(2)
-
-    # Mock payment success
+    # TODO: Replace with real payment gateway (Razorpay/Stripe)
+    # For now, simulate payment processing
     payment_success = True
     payment_id = f"pay_{int(time.time())}"
 

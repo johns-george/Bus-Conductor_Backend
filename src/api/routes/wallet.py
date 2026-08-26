@@ -1,3 +1,4 @@
+import logging
 import time
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
@@ -5,6 +6,8 @@ from sqlalchemy.orm import Session
 from src.core.database import get_db
 from src.dao.wallet_dao import get_or_create_wallet, top_up, debit
 from src.dao.transaction_dao import create_transaction
+
+logger = logging.getLogger("busconductor.wallet")
 
 router = APIRouter(prefix="/wallet", tags=["wallet"])
 
@@ -68,11 +71,9 @@ def wallet_topup_via_payment(user_id: int, payload: WalletTopupPaymentRequest, d
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
 
-    print(f"💳 Processing wallet top-up: ₹{payload.amount} via {payload.method_type}")
+    logger.info("Processing wallet top-up: ₹%.2f via %s", payload.amount, payload.method_type)
 
-    # Simulate payment processing delay
-    time.sleep(2)
-
+    # TODO: Replace with real payment gateway
     payment_id = f"pay_{int(time.time())}"
     payment_success = True  # Mock — always succeeds
 
@@ -107,7 +108,7 @@ def wallet_topup_via_payment(user_id: int, payload: WalletTopupPaymentRequest, d
         payment_id=payment_id,
     )
 
-    print(f"✅ Wallet top-up successful: {payment_id}")
+    logger.info("Wallet top-up successful: %s", payment_id)
 
     return {
         "user_id": wallet.user_id,

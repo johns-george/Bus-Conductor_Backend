@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from src.core.database import get_db
@@ -5,32 +6,28 @@ from src.models.bus import Bus
 from src.models.bus_route import BusRoute
 from src.models.route import Route
 
+logger = logging.getLogger("busconductor.bus")
+
 router = APIRouter(prefix="/buses", tags=["buses"])
 
 
 @router.get("/by-route/{route_id}")
 def buses_by_route(route_id: int, db: Session = Depends(get_db)):
     try:
-        print(f"🔍 Querying buses for route_id: {route_id}")
-        
-        # Check if route exists first
+        logger.debug("Querying buses for route_id: %d", route_id)
+
         route_exists = db.query(Route).filter(Route.id == route_id).first()
         if not route_exists:
-            print(f"❌ Route {route_id} not found")
-            return {
-                "route_id": route_id,
-                "items": [],
-                "message": "Route not found",
-            }
-        
-        # Query bus routes for this route
+            logger.debug("Route %d not found", route_id)
+            return {"route_id": route_id, "items": [], "message": "Route not found"}
+
         rows = db.query(BusRoute).filter(BusRoute.route_id == route_id).all()
-        print(f"🔍 Found {len(rows)} bus routes for route {route_id}")
-        
+        logger.debug("Found %d bus routes for route %d", len(rows), route_id)
+
         items = []
         for row in rows:
             try:
-                item = {
+                items.append({
                     "id": row.bus.id,
                     "name": row.bus.name,
                     "bus_number": row.bus.bus_number,
@@ -40,22 +37,16 @@ def buses_by_route(route_id: int, db: Session = Depends(get_db)):
                     "route_id": row.route_id,
                     "start_time": row.start_time.isoformat(),
                     "platform": row.platform or "P1",
-                }
-                items.append(item)
-                print(f"✅ Added bus {row.bus.id} ({row.bus.name})")
+                })
             except Exception as e:
-                print(f"❌ Error processing bus route {row.id}: {e}")
+                logger.warning("Error processing bus route %d: %s", row.id, e)
                 continue
-        
-        print(f"🔍 Returning {len(items)} bus items")
-        return {
-            "route_id": route_id,
-            "items": items,
-            "message": "Buses by route",
-        }
-        
+
+        logger.debug("Returning %d bus items", len(items))
+        return {"route_id": route_id, "items": items, "message": "Buses by route"}
+
     except Exception as e:
-        print(f"❌ Database error: {e}")
+        logger.error("Database error for route %d: %s", route_id, e)
         return {
             "route_id": route_id,
             "items": [],
