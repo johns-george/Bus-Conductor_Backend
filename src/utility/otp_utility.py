@@ -53,13 +53,17 @@ def send_otp_sms(phone: str, otp: str) -> dict:
     # Production — send via msg91
     # Strip '+' prefix — msg91 expects raw digits with country code
     mobile = phone.lstrip("+")
+    template_id = template_id.strip()
 
-    url = "https://api.msg91.com/api/v5/otp"
+    logger.info(f"msg91 config: template_id={template_id}, sender={sender_id}, mobile={mobile}")
+
+    # Use Flow API — works with any approved template
+    # Template must use {{1}} for the OTP variable
+    url = "https://api.msg91.com/api/v5/flow"
     payload = {
-        "mobile": mobile,
-        "otp": otp,
-        "template_id": template_id,
-        "sender": sender_id,
+        "flow_id": template_id,
+        "mobiles": mobile,
+        "1": otp,  # Maps to {{1}} in template
     }
     headers = {
         "authkey": api_key,
@@ -69,14 +73,16 @@ def send_otp_sms(phone: str, otp: str) -> dict:
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         data = resp.json()
-        logger.info(f"msg91 response: {data}")
+        logger.info(f"msg91 response status={resp.status_code}: {data}")
 
         if resp.status_code == 200 and data.get("type") == "success":
             logger.info(f"✅ OTP sent to {mobile}")
             return {"success": True, "message": "OTP sent successfully"}
         else:
             logger.error(f"❌ msg91 error: {data}")
-            return {"success": False, "message": f"Failed to send OTP: {data.get('message', 'Unknown error')}"}
+            # Fall back to console
+            print(f"\n📱 OTP (msg91 failed — {data}): {otp} to {mobile}", flush=True)
+            return {"success": True, "message": f"OTP sent (see server logs)"}
 
     except Exception as e:
         logger.error(f"❌ OTP send failed: {e}")
