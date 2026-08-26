@@ -1,7 +1,6 @@
 import os
 
 from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from src.api.routes import auth
@@ -23,52 +22,23 @@ from src.core.database import Base, engine
 
 app = FastAPI()
 
-# CORS — use ALLOWED_ORIGINS env var (comma-separated) or * for all
-_allowed = os.getenv("ALLOWED_ORIGINS", "*")
-_origins = [o.strip() for o in _allowed.split(",") if o.strip()]
-_wildcard = "*" in _origins
-
-if not _wildcard:
-    # Specific origins — use Starlette's built-in CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
-
-
+# CORS — reflect any Origin so credentials work from any frontend
 @app.middleware("http")
 async def cors_middleware(request: Request, call_next):
-    """Handles CORS. When ALLOWED_ORIGINS=*, reflects any Origin with credentials.
-    When specific origins, Starlette CORSMiddleware handles it above."""
     origin = request.headers.get("origin")
 
-    # Handle preflight OPTIONS
+    # Preflight
     if request.method == "OPTIONS":
         resp = Response(status_code=204)
-        if _wildcard:
-            if origin:
-                resp.headers["Access-Control-Allow-Origin"] = origin
-            resp.headers["Access-Control-Allow-Credentials"] = "true"
-            resp.headers["Access-Control-Allow-Methods"] = "*"
-            resp.headers["Access-Control-Allow-Headers"] = "*"
-            resp.headers["Access-Control-Max-Age"] = "600"
-        elif origin in _origins:
+        if origin:
             resp.headers["Access-Control-Allow-Origin"] = origin
-            resp.headers["Access-Control-Allow-Credentials"] = "true"
-            resp.headers["Access-Control-Allow-Methods"] = "*"
-            resp.headers["Access-Control-Allow-Headers"] = "*"
-            resp.headers["Access-Control-Max-Age"] = "600"
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "*"
+        resp.headers["Access-Control-Max-Age"] = "600"
         return resp
 
-    # For actual requests — let Starlette CORSMiddleware handle non-wildcard
-    if not _wildcard:
-        return await call_next(request)
-
-    # Wildcard mode — reflect origin on response
+    # Actual request
     resp = await call_next(request)
     if origin:
         resp.headers["Access-Control-Allow-Origin"] = origin
