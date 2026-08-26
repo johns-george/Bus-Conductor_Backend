@@ -11,6 +11,10 @@ from src.utility.auth_utility import create_access_token, decode_access_token
 router=APIRouter(prefix="/auth")
 
 
+class FirebaseTokenRequest(BaseModel):
+    id_token: str
+
+
 class OtpRequest(BaseModel):
     phone: str
     country: str
@@ -127,6 +131,12 @@ def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(
 @router.post("/forgot-email")
 def forgot_email(payload: ForgotEmailRequest, db: Session = Depends(get_db)):
     return auth_service.find_email_by_phone(payload.phone, db)
+
+
+@router.post("/firebase-login")
+def firebase_login(payload: FirebaseTokenRequest, db: Session = Depends(get_db), response: Response = None):
+    """Verify a Firebase ID token and create/return our app's JWT tokens."""
+    return auth_service.firebase_phone_login(payload.id_token, db, response)
 
 
 @router.get("/me")

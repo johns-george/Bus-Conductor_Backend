@@ -180,6 +180,60 @@ def verify_otp(request_id: str, code: str, db: Session, response: Response):
     }
 
 
+def firebase_phone_login(id_token: str, db: Session, response: Response):
+    """Verify a Firebase ID token and create/return our app's JWT tokens."""
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+    import os
+
+    try:
+        # Verify the Firebase ID token using Google's public keys
+        # This works without firebase-admin SDK
+        project_id = os.getenv("FIREBASE_PROJECT_ID", "")
+        claims = google_id_token.verify_firebase_token(
+            id_token,
+            google_requests.Request(),
+            audience=project_id if project_id else None,
+        )
+    except Exception as e:
+        print(f"❌ Firebase token verification failed: {e}", flush=True)
+        raise HTTPException(status_code=401, detail=f"Invalid Firebase token: {e}")
+
+    phone = claims.get("phone_number", "")
+    email = claims.get("email", "")
+    firebase_uid = claims.get("sub", "")
+    name = claims.get("name", "")
+
+    # Find or create user
+    username = phone or f"fb_{firebase_uid[:12]}"
+    user = db.query(User).filter(User.username == username).first()
+
+    if user is None:
+        user = User(
+            username=username,
+            email=email or f"{phone}@phone.local" if phone else f"{firebase_uid}@firebase.local",
+            password_hash=None,
+            full_name=name or "Phone User",
+            mobile_number=phone or None,
+            google_id=firebase_uid,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif not user.google_id:
+        user.google_id = firebase_uid
+        db.commit()
+
+    access_token, refresh_token = create_tokens(user.username)
+    _set_auth_cookies(response, access_token, refresh_token)
+    return {
+        "message": "Phone login successful",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": _user_payload(user),
+    }
+
+
 def find_email_by_phone(phone: str, db: Session):
     """Find email by phone number."""
     user = db.query(User).filter(User.mobile_number == phone).first()
